@@ -120,7 +120,12 @@ def _source_files(root: Path) -> list[Path]:
         relative = path.relative_to(root)
         top_level = relative.parts[0].lower() if relative.parts else ""
         in_source_tree = top_level in {"include", "src", "tests"}
-        is_cmake = path.name.lower().startswith("cmakelists") or path.suffix.lower() == ".cmake"
+        # CMake inputs belong to the repository root or its dedicated cmake/
+        # tree.  Do not traverse ignored editor/agent worktrees which may
+        # contain complete nested checkouts and would make a clean checkout
+        # fingerprint depend on local tooling state.
+        is_cmake_file = path.name.lower().startswith("cmakelists") or path.suffix.lower() == ".cmake"
+        is_cmake = is_cmake_file and (len(relative.parts) == 1 or top_level == "cmake")
         if (in_source_tree and path.suffix.lower() in accepted) or is_cmake:
             files.append(path)
     return sorted(files, key=lambda item: item.relative_to(root).as_posix())

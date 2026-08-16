@@ -55,11 +55,15 @@ def sha256_file(path: str | os.PathLike[str]) -> str:
 
 
 def source_fingerprint(root: Path, paths: Iterable[Path]) -> str:
-    """Hash relative names and bytes, independent of host path separators."""
+    """Hash source names/text independent of host paths and checkout EOLs."""
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
-        data = path.read_bytes()
+        # Git may materialize the same text blob with LF, CRLF, or mixed
+        # newlines depending on core.autocrlf and attributes.  The scanner
+        # parses these files as text, so its semantic fingerprint must use a
+        # canonical newline representation as well.
+        data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
         digest.update(len(data).to_bytes(8, "big"))

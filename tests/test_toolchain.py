@@ -110,6 +110,20 @@ class ExtractorTests(ToolchainFixture):
     def test_determinism(self):
         self.assertEqual(self.contract(), self.contract())
 
+    def test_fingerprint_is_checkout_eol_independent(self):
+        before = self.contract()["source_fingerprint"]
+        path = self.root / "CMakeLists.txt"
+        lf = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        path.write_bytes(lf.replace(b"\n", b"\r\n"))
+        self.assertEqual(before, self.contract()["source_fingerprint"])
+
+    def test_nested_tool_worktree_is_out_of_scope(self):
+        before = self.contract()
+        nested = self.root / ".claude" / "worktrees" / "agent"
+        nested.mkdir(parents=True)
+        (nested / "CMakeLists.txt").write_text("add_compile_definitions(ES_FOREIGN)\n", encoding="utf-8")
+        self.assertEqual(before, self.contract())
+
     def test_snapshot_drift(self):
         before = self.contract()["source_fingerprint"]
         path = self.root / "include" / "abi" / "linux_x86_64.h"
