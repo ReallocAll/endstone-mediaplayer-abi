@@ -1,0 +1,384 @@
+name: Runtime ABI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mediaplayer_ref:
+        description: MediaPlayer ref or commit
+        required: true
+        default: dev
+        type: string
+      endstone_ref:
+        description: Endstone release ref, or latest
+        required: true
+        default: latest
+        type: string
+      diagnostic_verbosity:
+        description: Diagnostic verbosity
+        required: true
+        default: normal
+        type: choice
+        options: [normal, verbose]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  prepare:
+    name: Resolve targets and requirements
+    runs-on: ubuntu-24.04
+    outputs:
+      mediaplayer_ref: ${{ steps.resolve.outputs.mediaplayer_ref }}
+      mediaplayer_commit: ${{ steps.identity.outputs.mediaplayer_commit }}
+      endstone_ref: ${{ steps.resolve.outputs.endstone_ref }}
+      endstone_version: ${{ steps.resolve.outputs.endstone_version }}
+      endstone_commit: ${{ steps.identity.outputs.endstone_commit }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - id: resolve
+        name: Resolve requested refs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_MEDIAPLAYER: ${{ github.event_name == 'workflow_dispatch' && inputs.mediaplayer_ref || 'dev' }}
+          REQUESTED_ENDSTONE: ${{ github.event_name == 'workflow_dispatch' && inputs.endstone_ref || 'latest' }}
+        run: |
+          set -euo pipefail
+          mp_ref="$REQUESTED_MEDIAPLAYER"
+          es_ref="$REQUESTED_ENDSTONE"
+          if [[ "$es_ref" == latest ]]; then
+            es_ref="$(gh api repos/EndstoneMC/endstone/releases/latest --jq .tag_name)"
+          fi
+          [[ "$es_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "mediaplayer_ref=$mp_ref" >> "$GITHUB_OUTPUT"
+          echo "endstone_ref=$es_ref" >> "$GITHUB_OUTPUT"
+          echo "endstone_version=${es_ref#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: ReallocAll/endstone-mediaplayer
+          ref: ${{ steps.resolve.outputs.mediaplayer_ref }}
+          path: mediaplayer
+      - uses: actions/checkout@v7
+        with:
+          repository: EndstoneMC/endstone
+          ref: ${{ steps.resolve.outputs.endstone_ref }}
+          path: endstone-source
+      - id: identity
+        name: Record exact source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "mediaplayer_commit=$(git -C mediaplayer rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "endstone_commit=$(git -C endstone-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          test -z "$(git -C mediaplayer status --porcelain)"
+          test -z "$(git -C endstone-source status --porcelain)"
+      - name: Extract current requirement contract
+        shell: bash
+        run: |
+          python tools/scan_mediaplayer_requirements.py \
+            --mediaplayer-root mediaplayer \
+            --source-repository ReallocAll/endstone-mediaplayer \
+            --source-ref '${{ steps.resolve.outputs.mediaplayer_ref }}' \
+            --source-commit '${{ steps.identity.outputs.mediaplayer_commit }}' \
+            --output handoff/requirements/requirements.json
+      - name: Run tooling tests
+        run: python -m unittest discover -s tests -v
+      - uses: actions/upload-artifact@v7
+        with:
+          name: internal-requirements
+          path: handoff/requirements/
+          retention-days: 7
+
+  windows:
+    name: Windows real Endstone probe and consumer gate
+    needs: prepare
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: ReallocAll/endstone-mediaplayer
+          ref: ${{ needs.prepare.outputs.mediaplayer_commit }}
+          path: mediaplayer
+      - uses: actions/checkout@v7
+        with:
+          repository: EndstoneMC/endstone
+          ref: ${{ needs.prepare.outputs.endstone_commit }}
+          path: endstone-source
+      - uses: actions/download-artifact@v8
+        with:
+          name: internal-requirements
+          path: handoff/requirements
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install runtime, build tools, and exact Endstone dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
+          conan profile detect --force
+          conan install endstone-source --output-folder endstone-conan --build=missing
+          clang-cl --version
+          endstone --help
+      - id: runtime
+        name: Resolve installed runtime metadata
+        shell: pwsh
+        run: |
+          $runtime = python -c "import importlib.metadata; print(importlib.metadata.version('endstone'))"
+          $bds = python -c "import endstone; print(endstone.__minecraft_version__)"
+          if ($runtime -ne '${{ needs.prepare.outputs.endstone_version }}') { throw "runtime version mismatch: $runtime" }
+          "bds_version=$bds" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Build exact Windows probe
+        shell: pwsh
+        run: |
+          cmake -S . -B probe-build -G Ninja `
+            -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            "-DENDSTONE_SOURCE_DIR=$pwd/endstone-source" `
+            "-DENDSTONE_REF=${{ needs.prepare.outputs.endstone_ref }}" `
+            "-DABI_PROBE_SOURCE_REF=${{ needs.prepare.outputs.endstone_ref }}" `
+            "-DABI_PROBE_SOURCE_COMMIT=${{ needs.prepare.outputs.endstone_commit }}" `
+            "-DBDS_VERSION=${{ steps.runtime.outputs.bds_version }}"
+          cmake --build probe-build -j 4
+          ctest --test-dir probe-build --output-on-failure
+      - name: Run fresh Windows Endstone/BDS probe
+        shell: pwsh
+        run: |
+          python tools/run_endstone_probe.py `
+            --server-dir "$env:RUNNER_TEMP/endstone-abi-${{ github.run_id }}-${{ github.run_attempt }}" `
+            --plugin probe-build/endstone_abi_probe.dll `
+            --report handoff/windows/runtime.json `
+            --run-id "${{ github.run_id }}-${{ github.run_attempt }}-windows" `
+            --log handoff/windows/console.log `
+            --summary handoff/windows/harness.json `
+            --timeout 900
+      - name: Validate and generate Windows header
+        shell: pwsh
+        run: |
+          python tools/validate_report.py --report handoff/windows/runtime.json `
+            --contract handoff/requirements/requirements.json --expected-platform windows `
+            --expected-run-id "${{ github.run_id }}-${{ github.run_attempt }}-windows" `
+            --expected-source-ref "${{ needs.prepare.outputs.endstone_ref }}" `
+            --expected-source-commit "${{ needs.prepare.outputs.endstone_commit }}" `
+            --expected-api-version 0.11 --require-complete
+          python tools/resolve_abi.py --contract handoff/requirements/requirements.json `
+            --platform windows --runtime-report handoff/windows/runtime.json `
+            --output-manifest handoff/windows/manifest.json `
+            --output-coverage handoff/windows/coverage.json `
+            --workflow-commit "${{ github.sha }}" --workflow-run-id "${{ github.run_id }}"
+          python tools/generate_headers.py --manifest handoff/windows/manifest.json `
+            --output-root handoff/windows --metadata handoff/windows/header-metadata.json
+      - name: Replace ABI headers and build current MediaPlayer on Windows
+        shell: pwsh
+        run: |
+          Remove-Item -Force mediaplayer/include/abi/*.h
+          Copy-Item -Force handoff/windows/include/abi/*.h mediaplayer/include/abi/
+          $headers = @(Get-ChildItem mediaplayer/include/abi -File)
+          if ($headers.Count -ne 1 -or $headers[0].Name -ne 'windows_x86_64.h') { throw 'stale ABI header survived overlay' }
+          cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build consumer-build -j 4
+          ctest --test-dir consumer-build --output-on-failure
+          $fingerprint = python -c "import json; print(json.load(open('handoff/requirements/requirements.json'))['source_fingerprint'])"
+          python tools/write_consumer_summary.py --output handoff/windows/consumer.json --platform windows `
+            --source-commit "${{ needs.prepare.outputs.mediaplayer_commit }}" --source-fingerprint $fingerprint `
+            --configure-command "cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo" `
+            --build-command "cmake --build consumer-build -j 4" `
+            --ctest-command "ctest --test-dir consumer-build --output-on-failure"
+      - uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: internal-windows
+          path: handoff/windows/
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: diagnostic-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            handoff/windows/
+            probe-build/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux:
+    name: Linux real Endstone probe and consumer gate
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: ReallocAll/endstone-mediaplayer
+          ref: ${{ needs.prepare.outputs.mediaplayer_commit }}
+          path: mediaplayer
+      - uses: actions/checkout@v7
+        with:
+          repository: EndstoneMC/endstone
+          ref: ${{ needs.prepare.outputs.endstone_commit }}
+          path: endstone-source
+      - uses: actions/download-artifact@v8
+        with:
+          name: internal-requirements
+          path: handoff/requirements
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Clang/libc++, runtime, and exact Endstone dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get install -y libc++-20-dev libc++abi-20-dev
+          python -m pip install --upgrade pip
+          python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
+          conan profile detect --force
+          conan install endstone-source --output-folder endstone-conan --build=missing \
+            -s compiler=clang -s compiler.version=20 -s compiler.libcxx=libc++ -s compiler.cppstd=20
+          clang++-20 --version
+          endstone --help
+      - id: runtime
+        name: Resolve installed runtime metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="$(python -c "import importlib.metadata; print(importlib.metadata.version('endstone'))")"
+          bds="$(python -c 'import endstone; print(endstone.__minecraft_version__)')"
+          test "$runtime" = '${{ needs.prepare.outputs.endstone_version }}'
+          echo "bds_version=$bds" >> "$GITHUB_OUTPUT"
+      - name: Build exact Linux probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B probe-build -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENDSTONE_SOURCE_DIR="$PWD/endstone-source" \
+            -DENDSTONE_REF='${{ needs.prepare.outputs.endstone_ref }}' \
+            -DABI_PROBE_SOURCE_REF='${{ needs.prepare.outputs.endstone_ref }}' \
+            -DABI_PROBE_SOURCE_COMMIT='${{ needs.prepare.outputs.endstone_commit }}' \
+            -DBDS_VERSION='${{ steps.runtime.outputs.bds_version }}'
+          cmake --build probe-build -j 4
+          ctest --test-dir probe-build --output-on-failure
+      - name: Run fresh Linux Endstone/BDS probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/run_endstone_probe.py \
+            --server-dir "$RUNNER_TEMP/endstone-abi-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --plugin probe-build/endstone_abi_probe.so \
+            --report handoff/linux/runtime.json \
+            --run-id '${{ github.run_id }}-${{ github.run_attempt }}-linux' \
+            --log handoff/linux/console.log \
+            --summary handoff/linux/harness.json \
+            --timeout 900
+      - name: Validate and generate Linux header
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/validate_report.py --report handoff/linux/runtime.json \
+            --contract handoff/requirements/requirements.json --expected-platform linux \
+            --expected-run-id '${{ github.run_id }}-${{ github.run_attempt }}-linux' \
+            --expected-source-ref '${{ needs.prepare.outputs.endstone_ref }}' \
+            --expected-source-commit '${{ needs.prepare.outputs.endstone_commit }}' \
+            --expected-api-version 0.11 --require-complete
+          python tools/resolve_abi.py --contract handoff/requirements/requirements.json \
+            --platform linux --runtime-report handoff/linux/runtime.json \
+            --output-manifest handoff/linux/manifest.json \
+            --output-coverage handoff/linux/coverage.json \
+            --workflow-commit '${{ github.sha }}' --workflow-run-id '${{ github.run_id }}'
+          python tools/generate_headers.py --manifest handoff/linux/manifest.json \
+            --output-root handoff/linux --metadata handoff/linux/header-metadata.json
+      - name: Replace ABI headers and build current MediaPlayer on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f mediaplayer/include/abi/*.h
+          cp handoff/linux/include/abi/*.h mediaplayer/include/abi/
+          mapfile -t headers < <(find mediaplayer/include/abi -maxdepth 1 -type f -printf '%f\n')
+          test "${#headers[@]}" -eq 1
+          test "${headers[0]}" = linux_x86_64.h
+          cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build consumer-build -j 4
+          ctest --test-dir consumer-build --output-on-failure
+          fingerprint="$(python -c "import json; print(json.load(open('handoff/requirements/requirements.json'))['source_fingerprint'])")"
+          python tools/write_consumer_summary.py --output handoff/linux/consumer.json --platform linux \
+            --source-commit '${{ needs.prepare.outputs.mediaplayer_commit }}' --source-fingerprint "$fingerprint" \
+            --configure-command "cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo" \
+            --build-command "cmake --build consumer-build -j 4" \
+            --ctest-command "ctest --test-dir consumer-build --output-on-failure"
+      - uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: internal-linux
+          path: handoff/linux/
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: diagnostic-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            handoff/linux/
+            probe-build/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  package:
+    name: Verify 100% coverage and package overlay
+    needs: [prepare, windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: internal-requirements
+          path: downloads/requirements
+      - uses: actions/download-artifact@v8
+        with:
+          name: internal-windows
+          path: downloads/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: internal-linux
+          path: downloads/linux
+      - name: Resolve, generate, package, and independently validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/resolve_abi.py --contract downloads/requirements/requirements.json \
+            --windows-runtime downloads/windows/runtime.json \
+            --linux-runtime downloads/linux/runtime.json \
+            --output-manifest package-work/manifest.json \
+            --output-coverage package-work/coverage.json \
+            --workflow-commit '${{ github.sha }}' --workflow-run-id '${{ github.run_id }}'
+          python tools/generate_headers.py --manifest package-work/manifest.json \
+            --output-root final-artifact --metadata package-work/header-metadata.json
+          python tools/package_artifact.py --root final-artifact \
+            --requirements downloads/requirements/requirements.json \
+            --windows-runtime downloads/windows/runtime.json \
+            --linux-runtime downloads/linux/runtime.json \
+            --manifest package-work/manifest.json --coverage package-work/coverage.json \
+            --readme docs/artifact-readme.md \
+            --workflow-commit '${{ github.sha }}' --workflow-run-id '${{ github.run_id }}' \
+            --windows-consumer-summary downloads/windows/consumer.json \
+            --linux-consumer-summary downloads/linux/consumer.json
+          python tools/validate_artifact.py --root final-artifact
+      - uses: actions/upload-artifact@v7
+        with:
+          name: endstone-mediaplayer-abi
+          path: final-artifact/
+          retention-days: 30

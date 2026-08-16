@@ -1,114 +1,103 @@
-# Endstone C++ Example Plugin
+# Endstone MediaPlayer ABI automation
 
-[![Build](https://github.com/EndstoneMC/cpp-example-plugin/actions/workflows/build.yml/badge.svg)](https://github.com/EndstoneMC/cpp-example-plugin/actions/workflows/build.yml)
+This repository generates the platform ABI headers consumed by
+[`ReallocAll/endstone-mediaplayer`](https://github.com/ReallocAll/endstone-mediaplayer).
+The values are measured from a probe compiled against an exact Endstone release and successfully loaded by the matching real Endstone/BDS runtime. Existing MediaPlayer header values are diagnostics only and are never fallback truth.
 
-A starter template for building [Endstone](https://github.com/EndstoneMC/endstone) plugins in C++.
-Endstone is a plugin framework for Minecraft Bedrock Dedicated Server, similar to
-Bukkit/Spigot/Paper for Java Edition. This template demonstrates commands, events,
-and permissions.
+## Supported flow
 
-## Use This Template
+The canonical workflow is `.github/workflows/abi.yml`:
 
-1. Click **Use this template** on GitHub (or fork/clone it)
-2. Rename the following to match your plugin:
+1. resolve the requested MediaPlayer ref and the latest stable (or explicitly pinned) Endstone release;
+2. scan the checked-out MediaPlayer source to discover its current, actually referenced ABI requirements;
+3. independently build and load the probe in fresh Windows x64 and Linux x64 Endstone/BDS processes;
+4. validate the versioned JSON reports and require exactly 100% current-platform coverage;
+5. generate the platform header, delete the checkout's existing ABI headers, overlay only the generated header, then configure, build, and run CTest;
+6. merge both successful platform reports and publish `endstone-mediaplayer-abi`.
 
-| What | Where | Example |
-|------|-------|---------|
-| Project name | `CMakeLists.txt` `project(...)` | `project(my_plugin VERSION 0.1.0 LANGUAGES CXX)` |
-| Plugin version | `CMakeLists.txt` `project(... VERSION ...)` | `0.1.0` |
-| Plugin metadata | `src/plugin.cpp` `ENDSTONE_PLUGIN(...)` | `"my_plugin", MY_PLUGIN_VERSION, MyPlugin` |
-| Plugin class | `include/plugin.h` class name | `MyPlugin` |
-| Prefix | `src/plugin.cpp` `prefix = ...` | `"MyPlugin"` |
-| Permission prefix | `src/plugin.cpp` permission names | `my_plugin.command.*` |
+Windows and Linux evidence is independent. A value from one platform can never satisfy the other platform.
 
-3. Update `ENDSTONE_API_VERSION` in `CMakeLists.txt` to the Endstone version you target
-4. Delete the example command/listener code and start building
+## Evidence hierarchy
 
-## Development
+Every resolved requirement records one of these provenances, in priority order:
 
-### Prerequisites
+1. `RUNTIME_OBJECT` — observed from a real live Endstone object;
+2. `RUNTIME_PROBE` — an exact compiler/language/layout fact emitted by the loaded probe;
+3. `RUNTIME_DERIVED` — an explicit dependency-checked derivation from exact runtime facts;
+4. `COMPILE_MEASURED` — an exact matching-SDK/toolchain fact unavailable from a live object;
+5. `STATIC_VERIFIED` — a documented exact source/compiler-layout fallback.
 
-**Windows:** [Visual Studio](https://visualstudio.microsoft.com/) 2019 or newer with the
-"Desktop development with C++" workload. CMake is included with Visual Studio, or install it
-separately from [cmake.org](https://cmake.org/download/).
+`ASSUMED`, `GUESSED`, `LIKELY`, `UNKNOWN`, `PLACEHOLDER`, stale header values, and cross-platform reuse are forbidden. Missing measurements, source/runtime identity mismatches, evidence conflicts, incomplete coverage, stale reports, probe load failures, unclean shutdowns, or consumer failures prevent the final artifact from being uploaded.
 
-**Linux:** Clang 15+ with libc++. Install via [apt.llvm.org](https://apt.llvm.org/):
+## Local discovery and tooling tests
 
-```bash
-# Install CMake and Ninja
-sudo apt-get install -y cmake ninja-build
+The source checkout is always explicit; no tool contains a personal path:
 
-# Install LLVM/Clang (replace 18 with desired version)
-wget https://apt.llvm.org/llvm.sh
-chmod +x llvm.sh
-sudo ./llvm.sh 18
-sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+```powershell
+python tools/scan_mediaplayer_requirements.py `
+  --mediaplayer-root C:\path\to\endstone-mediaplayer `
+  --source-repository ReallocAll/endstone-mediaplayer `
+  --source-ref dev `
+  --source-commit <commit> `
+  --output build/requirements.json
+
+python -m unittest discover -s tests -v
 ```
 
-### Building
+The scanner fingerprints the relevant MediaPlayer source tree, distinguishes platform requirements, records unused generated definitions only as diagnostics, and fails on an undefined new `ES_*` reference. The tooling tests cover extraction drift, report/schema failures, evidence priority and conflicts, platform isolation, deterministic headers, missing-measurement gates, and malformed artifacts.
 
-```bash
-git clone https://github.com/EndstoneMC/cpp-example-plugin.git
-cd cpp-example-plugin
-```
+## Probe build and execution
 
-**Windows:**
-```bash
-cmake -B build
-cmake --build build --config Release
-```
+The probe requires CMake 3.21+, Ninja, x86-64, and the Endstone-compatible compiler/standard library: clang-cl/MSVC STL on Windows and Clang/libc++ on Linux. `ENDSTONE_SOURCE_DIR` must be a read-only checkout whose HEAD matches `ABI_PROBE_SOURCE_COMMIT`.
 
-**Linux:**
-```bash
-CC=clang-18 CXX=clang++-18 cmake -B build -DCMAKE_BUILD_TYPE=Release
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-cl `
+  "-DENDSTONE_SOURCE_DIR=C:\path\to\endstone" `
+  "-DENDSTONE_REF=v0.11.8" `
+  "-DABI_PROBE_SOURCE_REF=v0.11.8" `
+  "-DABI_PROBE_SOURCE_COMMIT=<exact-commit>" `
+  "-DBDS_VERSION=26.40"
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-## Project Structure
+`tools/run_endstone_probe.py` stages the built plugin into a fresh server directory, launches the official `endstone --yes --no-interactive` entry point, binds the report to a fresh run ID, waits for the structured completion marker, sends `stop`, verifies clean exit, and preserves the console log. A player is not required.
 
+## GitHub Actions inputs
+
+Pushes to `main` use MediaPlayer `dev` (the current release-development target) and resolve Endstone `latest` from the official GitHub release. `workflow_dispatch` accepts:
+
+- `mediaplayer_ref` — any target MediaPlayer ref or commit;
+- `endstone_ref` — `latest` or a supported release tag such as `v0.11.8`;
+- `diagnostic_verbosity` — retained diagnostic detail without a runtime-skip mode.
+
+There is intentionally no mode that can skip real Endstone execution and still publish the final artifact.
+
+## Artifact overlay
+
+The final artifact root mirrors MediaPlayer:
+
+```text
+include/abi/windows_x86_64.h
+include/abi/linux_x86_64.h
+abi-evidence/requirements.json
+abi-evidence/windows-runtime.json
+abi-evidence/linux-runtime.json
+abi-evidence/manifest.json
+abi-evidence/coverage.json
+abi-evidence/README.md
 ```
-include/
-  plugin.h       Plugin lifecycle, commands
-  listener.h     Event listener (player join/quit)
-src/
-  plugin.cpp     Plugin metadata, command and permission declarations
+
+After downloading and extracting `endstone-mediaplayer-abi`, overlay it onto an isolated MediaPlayer checkout:
+
+```powershell
+Copy-Item -Recurse -Force .\include\abi\* C:\path\to\endstone-mediaplayer\include\abi\
 ```
 
-## Install on a Server
+`abi-evidence/manifest.json` records the workflow, MediaPlayer, Endstone, BDS, compiler/stdlib, coverage/provenance, consumer-gate, and SHA-256 identities. Run `python tools/validate_artifact.py --root <extracted-root>` before use.
 
-After building, copy the output binary to your server's `plugins/` folder:
-- **Windows:** `build/Release/endstone_cpp_example.dll`
-- **Linux:** `build/endstone_cpp_example.so`
+## Adding a new ABI requirement
 
-Restart the server to load the plugin.
+Add the new `ES_*` use to MediaPlayer and declare it in the appropriate platform ABI header interface. The next scan will promote it into the current contract. Add a value-free measurement strategy to `src/registry.cpp` and an exact probe expression in the appropriate probe component. Add tooling fixtures if the syntax/category is new. CI must fail until both applicable platforms independently resolve the requirement and the generated-header consumer gates pass.
 
-## Releasing
-
-This template includes a GitHub Actions release workflow. To make a release:
-
-1. Add your changes under `## [Unreleased]` in `CHANGELOG.md`
-2. Go to **Actions > Release > Run workflow**
-3. Enter the version (e.g. `0.1.0`) and run
-
-The workflow validates the version, updates the changelog, creates a git tag and GitHub release,
-builds for both Windows and Linux, and attaches the binaries to the release.
-
-Use **dry run** to preview without making changes.
-
-## Troubleshooting
-
-**`GLIBC_2.xx not found` when loading the plugin on Linux**
-
-Plugins are linked against glibc at build time and require the same or newer version at
-runtime. A plugin built on Ubuntu 24.04 will not load on a server running Ubuntu 22.04.
-
-To maximize compatibility, build on an older OS. GitHub Actions runners (Ubuntu 22.04)
-are a good default for this reason.
-
-## Documentation
-
-For more on the Endstone API, see the [documentation](https://endstone.dev/latest/).
-
-## License
-
-[MIT License](LICENSE)
+Static analysis remains an exception path: document why runtime object, loaded probe, runtime derivation, and matching compile measurement cannot provide the fact before accepting `STATIC_VERIFIED`.
