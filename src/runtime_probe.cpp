@@ -44,11 +44,8 @@ std::vector<std::string> split_dependencies(std::string_view text)
 
 bool is_derived(std::string_view name)
 {
-    return name == "ES_VTABLE_SLOT_COUNT" || name == "ES_CMD_VTABLE_SLOT_COUNT" ||
-           name == "ES_ENDSTONE_PLAYER_OFF_OFFLINE_PLAYER" || name == "ES_MAPCANVAS_OFF_BUFFER_BEGIN" ||
-           name == "ES_MAPCANVAS_OFF_BUFFER_END" || name == "ES_BLOCK_SLOT_DELETE" ||
-           name == "ES_BLOCK_DATA_SLOT_DELETE" || name == "ES_ITEM_META_SLOT_DELETE" ||
-           name == "ES_ITEM_STACK_SLOT_DELETE" || name == "ES_BOSSBAR_SLOT_DTOR" ||
+    return name == "ES_BLOCK_SLOT_DELETE" || name == "ES_ITEM_META_SLOT_DELETE" ||
+           name == "ES_BOSSBAR_SLOT_DTOR" ||
            name.find("_SLOT_DTOR") != std::string_view::npos;
 }
 
@@ -202,6 +199,13 @@ ProbeReport collect_report(const endstone::Plugin *plugin, bool live_context, st
             }
             else if (is_derived(entry.name)) {
                 requirement.provenance = Provenance::RuntimeDerived;
+            }
+            else if (fact.provenance == Provenance::RuntimeDerived) {
+                // Some exact compiler/layout probes calculate their result from
+                // private or member-pointer intermediates which are not ABI
+                // requirements themselves.  They are primary RUNTIME_PROBE
+                // evidence, not a dependency-addressable final derivation.
+                requirement.provenance = Provenance::RuntimeProbe;
             }
             else {
                 requirement.provenance = fact.provenance;
