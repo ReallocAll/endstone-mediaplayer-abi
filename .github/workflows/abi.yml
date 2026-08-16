@@ -126,17 +126,19 @@ jobs:
       - name: Install runtime, build tools, and exact Endstone dependencies
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip
           python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
           conan profile detect --force
           conan remote add --force endstone https://conan.cloudsmith.io/endstone/conan/
-          conan install endstone-source --output-folder endstone-conan --build=missing
+          conan install endstone-source --output-folder endstone-conan --build=missing -s compiler.cppstd=20
           clang-cl --version
           endstone --help
       - id: runtime
         name: Resolve installed runtime metadata
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $runtime = python -c "import importlib.metadata; print(importlib.metadata.version('endstone'))"
           $bds = python -c "import endstone; print(endstone.__minecraft_version__)"
           if ($runtime -ne '${{ needs.prepare.outputs.endstone_version }}') { throw "runtime version mismatch: $runtime" }
@@ -144,6 +146,7 @@ jobs:
       - name: Build exact Windows probe
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake -S . -B probe-build -G Ninja `
             -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo `
             "-DENDSTONE_SOURCE_DIR=$pwd/endstone-source" `
@@ -156,6 +159,7 @@ jobs:
       - name: Run fresh Windows Endstone/BDS probe
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $plugins = @(Get-ChildItem -Path probe-build -Recurse -File -Filter 'endstone_abi_probe*.dll')
           if ($plugins.Count -ne 1) {
             $plugins | ForEach-Object { Write-Host $_.FullName }
@@ -172,6 +176,7 @@ jobs:
       - name: Validate and generate Windows header
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python tools/validate_report.py --report handoff/windows/runtime.json `
             --contract handoff/requirements/requirements.json --expected-platform windows `
             --expected-run-id "${{ github.run_id }}-${{ github.run_attempt }}-windows" `
@@ -188,6 +193,7 @@ jobs:
       - name: Replace ABI headers and build current MediaPlayer on Windows
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           Remove-Item -Force mediaplayer/include/abi/*.h
           Copy-Item -Force handoff/windows/include/abi/*.h mediaplayer/include/abi/
           $headers = @(Get-ChildItem mediaplayer/include/abi -File)
@@ -248,6 +254,7 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 20
           sudo apt-get install -y libc++-20-dev libc++abi-20-dev
+          export CC=clang-20 CXX=clang++-20
           python -m pip install --upgrade pip
           python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
           conan profile detect --force
