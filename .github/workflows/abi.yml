@@ -129,6 +129,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
           conan profile detect --force
+          conan remote add --force endstone https://conan.cloudsmith.io/endstone/conan/
           conan install endstone-source --output-folder endstone-conan --build=missing
           clang-cl --version
           endstone --help
@@ -155,9 +156,14 @@ jobs:
       - name: Run fresh Windows Endstone/BDS probe
         shell: pwsh
         run: |
+          $plugins = @(Get-ChildItem -Path probe-build -Recurse -File -Filter 'endstone_abi_probe*.dll')
+          if ($plugins.Count -ne 1) {
+            $plugins | ForEach-Object { Write-Host $_.FullName }
+            throw "expected exactly one Windows probe plugin, found $($plugins.Count)"
+          }
           python tools/run_endstone_probe.py `
             --server-dir "$env:RUNNER_TEMP/endstone-abi-${{ github.run_id }}-${{ github.run_attempt }}" `
-            --plugin probe-build/endstone_abi_probe.dll `
+            --plugin "$($plugins[0].FullName)" `
             --report handoff/windows/runtime.json `
             --run-id "${{ github.run_id }}-${{ github.run_attempt }}-windows" `
             --log handoff/windows/console.log `
@@ -245,6 +251,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install cmake ninja conan "endstone==${{ needs.prepare.outputs.endstone_version }}"
           conan profile detect --force
+          conan remote add --force endstone https://conan.cloudsmith.io/endstone/conan/
           conan install endstone-source --output-folder endstone-conan --build=missing \
             -s compiler=clang -s compiler.version=20 -s compiler.libcxx=libc++ -s compiler.cppstd=20
           clang++-20 --version
@@ -275,9 +282,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mapfile -t plugins < <(find probe-build -type f -name 'endstone_abi_probe*.so')
+          if [[ ${#plugins[@]} -ne 1 ]]; then
+            printf '%s\n' "${plugins[@]}"
+            echo "expected exactly one Linux probe plugin, found ${#plugins[@]}" >&2
+            exit 1
+          fi
           python tools/run_endstone_probe.py \
             --server-dir "$RUNNER_TEMP/endstone-abi-${{ github.run_id }}-${{ github.run_attempt }}" \
-            --plugin probe-build/endstone_abi_probe.so \
+            --plugin "${plugins[0]}" \
             --report handoff/linux/runtime.json \
             --run-id '${{ github.run_id }}-${{ github.run_attempt }}-linux' \
             --log handoff/linux/console.log \
