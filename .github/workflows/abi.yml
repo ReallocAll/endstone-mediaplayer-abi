@@ -11,9 +11,9 @@ on:
         default: dev
         type: string
       endstone_ref:
-        description: Endstone release ref, or latest
+        description: Endstone release ref (must be v0.11.8)
         required: true
-        default: latest
+        default: v0.11.8
         type: string
       diagnostic_verbosity:
         description: Diagnostic verbosity
@@ -27,6 +27,8 @@ permissions:
 
 env:
   PYTHONUTF8: "1"
+  EXPECTED_ENDSTONE_COMMIT: 94457f642426c957dba1ef7d09375398bc7f8279
+  EXPECTED_BDS_VERSION: "26.40"
 
 jobs:
   prepare:
@@ -49,15 +51,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_MEDIAPLAYER: ${{ github.event_name == 'workflow_dispatch' && inputs.mediaplayer_ref || 'dev' }}
-          REQUESTED_ENDSTONE: ${{ github.event_name == 'workflow_dispatch' && inputs.endstone_ref || 'latest' }}
+          REQUESTED_ENDSTONE: ${{ github.event_name == 'workflow_dispatch' && inputs.endstone_ref || 'v0.11.8' }}
         run: |
           set -euo pipefail
           mp_ref="$REQUESTED_MEDIAPLAYER"
           es_ref="$REQUESTED_ENDSTONE"
-          if [[ "$es_ref" == latest ]]; then
-            es_ref="$(gh api repos/EndstoneMC/endstone/releases/latest --jq .tag_name)"
-          fi
-          [[ "$es_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$es_ref" = v0.11.8
           echo "mediaplayer_ref=$mp_ref" >> "$GITHUB_OUTPUT"
           echo "endstone_ref=$es_ref" >> "$GITHUB_OUTPUT"
           echo "endstone_version=${es_ref#v}" >> "$GITHUB_OUTPUT"
@@ -78,6 +77,7 @@ jobs:
           set -euo pipefail
           echo "mediaplayer_commit=$(git -C mediaplayer rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "endstone_commit=$(git -C endstone-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          test "$(git -C endstone-source rev-parse HEAD)" = "$EXPECTED_ENDSTONE_COMMIT"
           test -z "$(git -C mediaplayer status --porcelain)"
           test -z "$(git -C endstone-source status --porcelain)"
       - name: Extract current requirement contract
@@ -142,6 +142,7 @@ jobs:
           $runtime = python -c "import importlib.metadata; print(importlib.metadata.version('endstone'))"
           $bds = python -c "import endstone; print(endstone.__minecraft_version__)"
           if ($runtime -ne '${{ needs.prepare.outputs.endstone_version }}') { throw "runtime version mismatch: $runtime" }
+          if ($bds -ne $env:EXPECTED_BDS_VERSION) { throw "BDS version mismatch: $bds" }
           "bds_version=$bds" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Build exact Windows probe
         shell: pwsh
@@ -153,7 +154,8 @@ jobs:
             "-DENDSTONE_REF=${{ needs.prepare.outputs.endstone_ref }}" `
             "-DABI_PROBE_SOURCE_REF=${{ needs.prepare.outputs.endstone_ref }}" `
             "-DABI_PROBE_SOURCE_COMMIT=${{ needs.prepare.outputs.endstone_commit }}" `
-            "-DBDS_VERSION=${{ steps.runtime.outputs.bds_version }}"
+            "-DBDS_VERSION=${{ steps.runtime.outputs.bds_version }}" `
+            "-DABI_PROBE_MEDIAPLAYER_ROOT=$pwd/mediaplayer"
           cmake --build probe-build -j 4
           ctest --test-dir probe-build --output-on-failure
       - name: Run fresh Windows Endstone/BDS probe
@@ -207,6 +209,24 @@ jobs:
             --configure-command "cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo" `
             --build-command "cmake --build consumer-build -j 4" `
             --ctest-command "ctest --test-dir consumer-build --output-on-failure"
+      - name: Run rebuilt MediaPlayer in fresh Windows Endstone/BDS
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $media = @(Get-ChildItem -Path consumer-build -Recurse -File -Filter 'endstone_mediaplayer.dll')
+          $smoke = @(Get-ChildItem -Path probe-build -Recurse -File -Filter 'endstone_abi_consumer_smoke.dll')
+          if ($media.Count -ne 1) { throw "expected one MediaPlayer plugin, found $($media.Count)" }
+          if ($smoke.Count -ne 1) { throw "expected one consumer smoke plugin, found $($smoke.Count)" }
+          python tools/run_consumer_smoke.py `
+            --server-dir "$env:RUNNER_TEMP/endstone-consumer-${{ github.run_id }}-${{ github.run_attempt }}-windows" `
+            --plugin "$($media[0].FullName)" --plugin "$($smoke[0].FullName)" `
+            --platform windows --run-id "${{ github.run_id }}-${{ github.run_attempt }}-windows-consumer" `
+            --media-player-commit "${{ needs.prepare.outputs.mediaplayer_commit }}" `
+            --endstone-commit "${{ needs.prepare.outputs.endstone_commit }}" `
+            --endstone-version "${{ needs.prepare.outputs.endstone_version }}" `
+            --bds-version "${{ steps.runtime.outputs.bds_version }}" `
+            --log handoff/windows/consumer-console.log `
+            --summary handoff/windows/consumer-runtime.json --timeout 900
       - uses: actions/upload-artifact@v7
         if: success()
         with:
@@ -271,6 +291,7 @@ jobs:
           runtime="$(python -c "import importlib.metadata; print(importlib.metadata.version('endstone'))")"
           bds="$(python -c 'import endstone; print(endstone.__minecraft_version__)')"
           test "$runtime" = '${{ needs.prepare.outputs.endstone_version }}'
+          test "$bds" = "$EXPECTED_BDS_VERSION"
           echo "bds_version=$bds" >> "$GITHUB_OUTPUT"
       - name: Build exact Linux probe
         shell: bash
@@ -282,7 +303,8 @@ jobs:
             -DENDSTONE_REF='${{ needs.prepare.outputs.endstone_ref }}' \
             -DABI_PROBE_SOURCE_REF='${{ needs.prepare.outputs.endstone_ref }}' \
             -DABI_PROBE_SOURCE_COMMIT='${{ needs.prepare.outputs.endstone_commit }}' \
-            -DBDS_VERSION='${{ steps.runtime.outputs.bds_version }}'
+            -DBDS_VERSION='${{ steps.runtime.outputs.bds_version }}' \
+            -DABI_PROBE_MEDIAPLAYER_ROOT="$PWD/mediaplayer"
           cmake --build probe-build -j 4
           ctest --test-dir probe-build --output-on-failure
       - name: Run fresh Linux Endstone/BDS probe
@@ -338,6 +360,24 @@ jobs:
             --configure-command "cmake -S mediaplayer -B consumer-build -G Ninja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo" \
             --build-command "cmake --build consumer-build -j 4" \
             --ctest-command "ctest --test-dir consumer-build --output-on-failure"
+      - name: Run rebuilt MediaPlayer in fresh Linux Endstone/BDS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t media < <(find consumer-build -type f -name 'endstone_mediaplayer.so')
+          mapfile -t smoke < <(find probe-build -type f -name 'endstone_abi_consumer_smoke.so')
+          test "${#media[@]}" -eq 1
+          test "${#smoke[@]}" -eq 1
+          python tools/run_consumer_smoke.py \
+            --server-dir "$RUNNER_TEMP/endstone-consumer-${{ github.run_id }}-${{ github.run_attempt }}-linux" \
+            --plugin "${media[0]}" --plugin "${smoke[0]}" \
+            --platform linux --run-id '${{ github.run_id }}-${{ github.run_attempt }}-linux-consumer' \
+            --media-player-commit '${{ needs.prepare.outputs.mediaplayer_commit }}' \
+            --endstone-commit '${{ needs.prepare.outputs.endstone_commit }}' \
+            --endstone-version '${{ needs.prepare.outputs.endstone_version }}' \
+            --bds-version '${{ steps.runtime.outputs.bds_version }}' \
+            --log handoff/linux/consumer-console.log \
+            --summary handoff/linux/consumer-runtime.json --timeout 900
       - uses: actions/upload-artifact@v7
         if: success()
         with:
@@ -394,8 +434,12 @@ jobs:
             --manifest package-work/manifest.json --coverage package-work/coverage.json \
             --readme docs/artifact-readme.md \
             --workflow-commit '${{ github.sha }}' --workflow-run-id '${{ github.run_id }}' \
-            --windows-consumer-summary downloads/windows/consumer.json \
-            --linux-consumer-summary downloads/linux/consumer.json
+             --windows-consumer-summary downloads/windows/consumer.json \
+             --linux-consumer-summary downloads/linux/consumer.json \
+             --windows-consumer-runtime downloads/windows/consumer-runtime.json \
+             --linux-consumer-runtime downloads/linux/consumer-runtime.json \
+             --windows-consumer-log downloads/windows/consumer-console.log \
+             --linux-consumer-log downloads/linux/consumer-console.log
           python tools/validate_artifact.py --root final-artifact
       - uses: actions/upload-artifact@v7
         with:

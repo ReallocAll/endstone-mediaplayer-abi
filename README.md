@@ -8,12 +8,13 @@ The values are measured from a probe compiled against an exact Endstone release 
 
 The canonical workflow is `.github/workflows/abi.yml`:
 
-1. resolve the requested MediaPlayer ref and the latest stable (or explicitly pinned) Endstone release;
+1. resolve the requested MediaPlayer ref and the pinned Endstone `v0.11.8` runtime target;
 2. scan the checked-out MediaPlayer source to discover its current, actually referenced ABI requirements;
 3. independently build and load the probe in fresh Windows x64 and Linux x64 Endstone/BDS processes;
 4. validate the versioned JSON reports and require exactly 100% current-platform coverage;
 5. generate the platform header, delete the checkout's existing ABI headers, overlay only the generated header, then configure, build, and run CTest;
-6. merge both successful platform reports and publish `endstone-mediaplayer-abi`.
+6. load each rebuilt MediaPlayer plus the ABI consumer smoke plugin in a second fresh Endstone/BDS process, execute `mpm help` and `mpv help`, exercise the logical-screen/frame API lifecycle, and require clean disable/shutdown;
+7. merge both successful platform reports and publish `endstone-mediaplayer-abi` only when both runtime-consumer proofs pass.
 
 Windows and Linux evidence is independent. A value from one platform can never satisfy the other platform.
 
@@ -65,10 +66,10 @@ ctest --test-dir build --output-on-failure
 
 ## GitHub Actions inputs
 
-Pushes to `main` use MediaPlayer `dev` (the current release-development target) and resolve Endstone `latest` from the official GitHub release. `workflow_dispatch` accepts:
+Pushes to `main` use MediaPlayer `dev` (the current release-development target) and Endstone `v0.11.8`. The workflow hard-checks Endstone commit `94457f642426c957dba1ef7d09375398bc7f8279` and BDS `26.40`. `workflow_dispatch` accepts:
 
 - `mediaplayer_ref` — any target MediaPlayer ref or commit;
-- `endstone_ref` — `latest` or a supported release tag such as `v0.11.8`;
+- `endstone_ref` — the supported `v0.11.8` tag (a different checkout fails the pinned-commit gate);
 - `diagnostic_verbosity` — retained diagnostic detail without a runtime-skip mode.
 
 There is intentionally no mode that can skip real Endstone execution and still publish the final artifact.
@@ -83,6 +84,10 @@ include/abi/linux_x86_64.h
 abi-evidence/requirements.json
 abi-evidence/windows-runtime.json
 abi-evidence/linux-runtime.json
+abi-evidence/windows-consumer-runtime.json
+abi-evidence/linux-consumer-runtime.json
+abi-evidence/windows-consumer-console.log
+abi-evidence/linux-consumer-console.log
 abi-evidence/manifest.json
 abi-evidence/coverage.json
 abi-evidence/README.md

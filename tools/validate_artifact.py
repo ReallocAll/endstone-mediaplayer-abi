@@ -8,13 +8,69 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .common import PLATFORMS, ToolError, contract_requirements, header_paths, media_player_metadata, read_json, relative_path, reject_forbidden, sha256_file
+    from .common import PLATFORMS, ToolError, contract_requirements, description_layout_invariant, header_paths, media_player_metadata, read_json, relative_path, reject_forbidden, sha256_file, validate_requirement_metadata
     from .validate_report import validate as validate_report
 except ImportError:
-    from common import PLATFORMS, ToolError, contract_requirements, header_paths, media_player_metadata, read_json, relative_path, reject_forbidden, sha256_file
+    from common import PLATFORMS, ToolError, contract_requirements, description_layout_invariant, header_paths, media_player_metadata, read_json, relative_path, reject_forbidden, sha256_file, validate_requirement_metadata
     from validate_report import validate as validate_report
 
-EVIDENCE_FILES = frozenset({"requirements.json", "windows-runtime.json", "linux-runtime.json", "manifest.json", "coverage.json", "README.md"})
+EVIDENCE_FILES = frozenset({
+    "requirements.json", "windows-runtime.json", "linux-runtime.json", "manifest.json", "coverage.json", "README.md",
+    "windows-consumer-runtime.json", "linux-consumer-runtime.json",
+    "windows-consumer-console.log", "linux-consumer-console.log",
+})
+
+
+def _validate_consumer_runtime(root: Path, evidence: Path, summary: Any, report: Any,
+                               requirements: Any, platform: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(summary, dict):
+        return [f"consumer runtime summary is malformed for {platform}"]
+    if summary.get("schema_version") != 1:
+        errors.append(f"consumer runtime schema_version is not 1 for {platform}")
+    if summary.get("status") != "PASS":
+        errors.append(f"consumer runtime status is not PASS for {platform}")
+    if summary.get("platform") != platform:
+        errors.append(f"consumer runtime platform differs for {platform}")
+    for field, expected in (("fresh_server", True), ("player_required", False),
+                            ("logical_screen_lifecycle", "PASS"), ("command_sender_message", "PASS"),
+                            ("graceful_shutdown", True), ("forced", False), ("exit_code", 0)):
+        if summary.get(field) != expected:
+            errors.append(f"consumer runtime {field} is invalid for {platform}")
+    commands = summary.get("commands")
+    if not isinstance(commands, list) or not {"mpm help", "mpv help"}.issubset(commands):
+        errors.append(f"consumer runtime commands are incomplete for {platform}")
+
+    expected_commit = None
+    try:
+        expected_commit = media_player_metadata(requirements).get("commit")
+    except ToolError:
+        pass
+    if summary.get("media_player_commit") != expected_commit:
+        errors.append(f"consumer runtime MediaPlayer commit differs for {platform}")
+
+    environment = report.get("environment") if isinstance(report, dict) else None
+    if not isinstance(environment, dict):
+        errors.append(f"consumer runtime Endstone environment is missing for {platform}")
+        environment = {}
+    for summary_key, environment_key, label in (("endstone_commit", "source_commit", "Endstone commit"),
+                                                 ("endstone_version", "endstone_runtime_version", "Endstone version"),
+                                                 ("bds_version", "bds_version", "BDS version")):
+        expected = environment.get(environment_key)
+        if summary.get(summary_key) != expected:
+            errors.append(f"consumer runtime {label} differs for {platform}")
+
+    log_name = f"{platform}-consumer-console.log"
+    expected_log = f"abi-evidence/{log_name}"
+    if summary.get("log") != expected_log:
+        errors.append(f"consumer runtime log path is not normalized for {platform}")
+    log_path = evidence / log_name
+    log_hash = summary.get("log_sha256")
+    if not log_path.is_file():
+        errors.append(f"consumer runtime log is missing for {platform}")
+    elif not isinstance(log_hash, str) or sha256_file(log_path) != log_hash:
+        errors.append(f"consumer runtime log hash mismatch for {platform}")
+    return errors
 
 
 def _manifest_entries(manifest: dict[str, Any], platform: str) -> list[dict[str, Any]]:
@@ -39,6 +95,7 @@ def _manifest_entries(manifest: dict[str, Any], platform: str) -> list[dict[str,
         if entry.get("provenance") in (None, "UNRESOLVED") or entry.get("value") is None:
             raise ToolError(f"unresolved manifest entry {platform}:{entry['name']}")
         reject_forbidden(entry, f"manifest:{platform}:{entry['name']}")
+        validate_requirement_metadata(entry, f"manifest:{platform}:{entry['name']}")
         location = entry.get("location")
         if isinstance(location, dict):
             location = location.get("path")
@@ -88,6 +145,8 @@ def validate(root: Path) -> list[str]:
         coverage = read_json(evidence / "coverage.json")
         windows = read_json(evidence / "windows-runtime.json")
         linux = read_json(evidence / "linux-runtime.json")
+        windows_consumer_runtime = read_json(evidence / "windows-consumer-runtime.json")
+        linux_consumer_runtime = read_json(evidence / "linux-consumer-runtime.json")
     except (OSError, ValueError) as exc:
         return errors + [f"malformed evidence JSON: {exc}"]
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
@@ -127,6 +186,15 @@ def validate(root: Path) -> list[str]:
                 errors.append(f"consumer source commit differs for {platform}")
             if summary.get("source_fingerprint") != expected_fingerprint:
                 errors.append(f"consumer source fingerprint differs for {platform}")
+    consumer_runtime = manifest.get("consumer_runtime") if isinstance(manifest, dict) else None
+    if not isinstance(consumer_runtime, dict):
+        errors.append("manifest consumer runtime metadata is missing")
+    else:
+        for platform, summary, report in (("windows", windows_consumer_runtime, windows), ("linux", linux_consumer_runtime, linux)):
+            embedded = consumer_runtime.get(platform)
+            if embedded != summary:
+                errors.append(f"embedded consumer runtime differs from evidence for {platform}")
+            errors.extend(_validate_consumer_runtime(root, evidence, summary, report, requirements, platform))
     contract: dict[str, list[dict[str, Any]]] | None = None
     try:
         contract = contract_requirements(requirements)
@@ -151,6 +219,9 @@ def validate(root: Path) -> list[str]:
                 errors.append("manifest header paths differ from requirements")
         except ToolError as exc:
             errors.append(f"invalid MediaPlayer identity: {exc}")
+    manifest_invariants = manifest.get("invariants") if isinstance(manifest, dict) else None
+    if not isinstance(manifest_invariants, dict):
+        errors.append("manifest invariant metadata is missing")
     for platform, report in (("windows", windows), ("linux", linux)):
         try:
             errors.extend(validate_report(report, expected_platform=platform, contract=requirements, require_complete=True))
@@ -176,6 +247,19 @@ def validate(root: Path) -> list[str]:
             errors.append(f"coverage is not complete for {platform}")
         if len(entries) != required:
             errors.append(f"manifest coverage is not complete for {platform}")
+        if contract is not None:
+            expected_items = {item["name"]: item for item in contract.get(platform, [])}
+            for entry in entries:
+                expected = expected_items.get(entry["name"])
+                if expected is None:
+                    continue
+                for field in ("category", "contract_identity", "runtime_required"):
+                    if entry.get(field) != expected.get(field):
+                        errors.append(f"manifest {platform}:{entry['name']} {field} differs from contract")
+                if entry.get("runtime_required") is True and entry.get("provenance") not in {
+                    "RUNTIME_OBJECT", "RUNTIME_PROBE", "RUNTIME_DERIVED"
+                }:
+                    errors.append(f"manifest {platform}:{entry['name']} is missing required runtime proof")
         if isinstance(section, dict):
             manifest_counts: dict[str, int] = {}
             for entry in entries:
@@ -186,6 +270,16 @@ def validate(root: Path) -> list[str]:
                 errors.append(f"coverage environment differs for {platform}")
             if section.get("runtime_run_id") != (manifest.get("runtime_run_ids", {}).get(platform) if isinstance(manifest.get("runtime_run_ids"), dict) else None):
                 errors.append(f"coverage run id differs for {platform}")
+        try:
+            expected_invariant = description_layout_invariant(entries)
+            if isinstance(manifest_invariants, dict):
+                platform_invariants = manifest_invariants.get("description_layout")
+                if isinstance(platform_invariants, dict) and platform in platform_invariants and "status" not in platform_invariants:
+                    platform_invariants = platform_invariants[platform]
+                if platform_invariants not in (expected_invariant, {"status": "NOT_APPLICABLE"}):
+                    errors.append(f"manifest description layout invariant differs for {platform}")
+        except ToolError as exc:
+            errors.append(f"invalid description layout invariant for {platform}: {exc}")
     expected_paths = {path for paths in (expected_manifest_paths or {}).values() for path in paths}
     actual_paths = {path.relative_to(root).as_posix() for path in (root / "include" / "abi").rglob("*") if path.is_file()} if (root / "include" / "abi").is_dir() else set()
     if actual_paths != expected_paths:

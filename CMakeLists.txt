@@ -174,6 +174,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 set_target_properties(abi_probe PROPERTIES OUTPUT_NAME "abi_probe")
 
+set(ABI_PROBE_MEDIAPLAYER_ROOT "" CACHE PATH
+    "MediaPlayer checkout used to build the optional runtime consumer smoke plugin")
+if(ABI_PROBE_MEDIAPLAYER_ROOT)
+    if(NOT EXISTS "${ABI_PROBE_MEDIAPLAYER_ROOT}/include/endstone_mediaplayer_api.h")
+        message(FATAL_ERROR
+            "ABI_PROBE_MEDIAPLAYER_ROOT does not contain include/endstone_mediaplayer_api.h")
+    endif()
+    endstone_add_plugin(abi_consumer_smoke src/consumer_smoke.cpp)
+    target_include_directories(abi_consumer_smoke PRIVATE
+        "${ABI_PROBE_MEDIAPLAYER_ROOT}/include")
+    target_link_libraries(abi_consumer_smoke PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(abi_consumer_smoke PROPERTIES
+        OUTPUT_NAME "abi_consumer_smoke")
+endif()
+
 # The internal block record header contains inline static identifiers whose
 # constructors are defined by Endstone's bedrock sources.  Compile those two
 # exact, read-only source files into an ABI-tree sidecar library so the probe
