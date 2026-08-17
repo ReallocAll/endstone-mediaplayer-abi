@@ -213,7 +213,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $media = @(Get-ChildItem -Path consumer-build -Recurse -File -Filter 'endstone_mediaplayer.dll')
+          $media = @(Get-ChildItem -Path consumer-build -File -Filter 'endstone_mediaplayer.dll')
           $smoke = @(Get-ChildItem -Path probe-build -Recurse -File -Filter 'endstone_abi_consumer_smoke.dll')
           if ($media.Count -ne 1) { throw "expected one MediaPlayer plugin, found $($media.Count)" }
           if ($smoke.Count -ne 1) { throw "expected one consumer smoke plugin, found $($smoke.Count)" }
@@ -364,7 +364,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t media < <(find consumer-build -type f -name 'endstone_mediaplayer.so')
+          mapfile -t media < <(find consumer-build -maxdepth 1 -type f -name 'endstone_mediaplayer.so')
           mapfile -t smoke < <(find probe-build -type f -name 'endstone_abi_consumer_smoke.so')
           test "${#media[@]}" -eq 1
           test "${#smoke[@]}" -eq 1
