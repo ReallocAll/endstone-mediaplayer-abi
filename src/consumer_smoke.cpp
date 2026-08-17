@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <endstone/endstone.hpp>
 
@@ -103,6 +104,30 @@ public:
         getLogger().info("ABI_CONSUMER_SMOKE_ON_DISABLE passed={}", passed_);
     }
 
+    bool onCommand(endstone::CommandSender &, const endstone::Command &command,
+                   const std::vector<std::string> &) override
+    {
+        if (command.getName() != "abi-player-smoke") {
+            return false;
+        }
+
+        const auto players = getServer().getOnlinePlayers();
+        if (players.size() != 1 || players.front() == nullptr) {
+            getLogger().error("ABI_CONSUMER_PLAYER_DISPATCH_FAIL online_players={}", players.size());
+            return true;
+        }
+
+        const auto &player = *players.front();
+        const bool accepted = player.performCommand("mpv create abi_generated_smoke");
+        if (accepted) {
+            getLogger().info("ABI_CONSUMER_PLAYER_DISPATCH_PASS player={}", player.getName());
+        }
+        else {
+            getLogger().error("ABI_CONSUMER_PLAYER_DISPATCH_FAIL player={} accepted=false", player.getName());
+        }
+        return true;
+    }
+
 private:
     bool passed_{false};
 };
@@ -115,4 +140,13 @@ ENDSTONE_PLUGIN("abi_consumer_smoke", "1.0.0", AbiConsumerSmoke)
     description = "Generated-header MediaPlayer runtime smoke";
     authors = {"Endstone MediaPlayer ABI"};
     depend = {"mediaplayer"};
+
+    command("abi-player-smoke")
+        .description("Dispatch the MediaPlayer physical ABI smoke through one real player")
+        .usages("/abi-player-smoke")
+        .permissions("abi_consumer_smoke.command.player");
+
+    permission("abi_consumer_smoke.command.player")
+        .description("Allow console dispatch of the real-player MediaPlayer ABI smoke")
+        .default_(endstone::PermissionDefault::Console);
 }
