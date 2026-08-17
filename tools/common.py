@@ -20,6 +20,103 @@ PROVENANCE_PRIORITY = {
     "STATIC_VERIFIED": 1,
 }
 PROVENANCES = frozenset(PROVENANCE_PRIORITY) | {"UNRESOLVED"}
+REQUIREMENT_CATEGORIES = frozenset({
+    "external_abi",
+    "consumer_synthetic_layout",
+    "compatibility_storage",
+    "derived_invariant",
+    "runtime_behavior",
+})
+
+
+def requirement_metadata(name: str) -> dict[str, Any]:
+    """Return the fixed semantic metadata for an ABI contract name.
+
+    Most registry facts are ordinary external ABI facts.  The small set of
+    exceptions is deliberately explicit so that a newly discovered macro is
+    never silently assigned a more specific meaning than the contract knows.
+    """
+    category = "external_abi"
+    if name in {"ES_PLUGIN_IMPL_SIZE", "ES_PLUGIN_OFF_DESCRIPTION", "ES_DESCRIPTION_ALIGN"}:
+        category = "consumer_synthetic_layout"
+    elif name in {"ES_BLOCK_SLOT_DELETE", "ES_BOSSBAR_SLOT_DTOR", "ES_ITEM_META_SLOT_DELETE"}:
+        category = "derived_invariant"
+    elif name in {"ES_MESSAGE_STRING_INDEX", "ES_PLUGIN_OFF_SERVER", "ES_PLUGIN_OFF_LOGGER"}:
+        category = "runtime_behavior"
+
+    identities = {
+        "ES_BLOCK_SLOT_SET_DATA": "void (endstone::Block::*)(const endstone::BlockData&, bool)",
+        "ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK": "endstone::ItemStack (endstone::ItemType::*)(int) const",
+    }
+    return {
+        "category": category,
+        "contract_identity": identities.get(name, name),
+        "runtime_required": category == "runtime_behavior",
+    }
+
+
+def validate_requirement_metadata(entry: Any, where: str = "requirement") -> dict[str, Any]:
+    """Validate and return required semantic metadata for one requirement."""
+    if not isinstance(entry, dict):
+        raise ToolError(f"{where} must be an object")
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise ToolError(f"{where}.name is required before metadata validation")
+    category = entry.get("category")
+    if category not in REQUIREMENT_CATEGORIES:
+        raise ToolError(f"{where}.category is missing or unknown")
+    identity = entry.get("contract_identity")
+    if not isinstance(identity, str) or not identity.strip():
+        raise ToolError(f"{where}.contract_identity is missing")
+    expected = requirement_metadata(name)
+    fixed_category_names = {
+        "ES_PLUGIN_IMPL_SIZE", "ES_PLUGIN_OFF_DESCRIPTION", "ES_DESCRIPTION_ALIGN",
+        "ES_BLOCK_SLOT_DELETE", "ES_BOSSBAR_SLOT_DTOR", "ES_ITEM_META_SLOT_DELETE",
+        "ES_MESSAGE_STRING_INDEX",
+    }
+    if name in fixed_category_names and category != expected["category"]:
+        raise ToolError(f"{where}.category does not match the contract identity")
+    if identity != expected["contract_identity"]:
+        raise ToolError(f"{where}.contract_identity does not match the contract identity")
+    if not isinstance(entry.get("runtime_required"), bool):
+        raise ToolError(f"{where}.runtime_required must be boolean")
+    return {
+        "category": category,
+        "contract_identity": identity,
+        "runtime_required": entry["runtime_required"],
+    }
+
+
+def description_layout_invariant(entries: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate the consumer-synthetic PluginDescription layout invariant."""
+    values = {entry.get("name"): entry.get("value") for entry in entries if isinstance(entry, dict)}
+    names = ("ES_PLUGIN_OFF_DESCRIPTION", "ES_DESCRIPTION_SIZE", "ES_PLUGIN_IMPL_SIZE", "ES_DESCRIPTION_ALIGN")
+    if not all(name in values for name in names):
+        return {"status": "NOT_APPLICABLE"}
+    if not all(isinstance(values[name], int) and not isinstance(values[name], bool) for name in names):
+        raise ToolError("description layout invariant values must be integers")
+    offset = values["ES_PLUGIN_OFF_DESCRIPTION"]
+    size = values["ES_DESCRIPTION_SIZE"]
+    impl_size = values["ES_PLUGIN_IMPL_SIZE"]
+    alignment = values["ES_DESCRIPTION_ALIGN"]
+    bounds = offset >= 0 and size >= 0 and offset + size <= impl_size
+    equality = offset + size == impl_size
+    aligned = alignment > 0 and offset % alignment == 0
+    if not (bounds and equality and aligned):
+        raise ToolError(
+            "description layout invariant failed: "
+            f"offset={offset}, size={size}, impl_size={impl_size}, align={alignment}"
+        )
+    return {
+        "status": "PASS",
+        "offset": offset,
+        "size": size,
+        "impl_size": impl_size,
+        "align": alignment,
+        "bounds": bounds,
+        "equality": equality,
+        "alignment": aligned,
+    }
 
 
 class ToolError(ValueError):
@@ -212,6 +309,7 @@ def contract_requirements(contract: Any) -> dict[str, list[dict[str, Any]]]:
                 raise ToolError(f"duplicate contract requirement {platform}:{name}")
             seen.add(name)
             copy = dict(item)
+            validate_requirement_metadata(copy, f"{platform}:{name}")
             copy.setdefault("ordinal", ordinal)
             normalized.append(copy)
         output[platform] = normalized

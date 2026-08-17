@@ -10,11 +10,11 @@ from typing import Any
 try:
     from .common import (
         PLATFORMS, PROVENANCE_PRIORITY, ToolError, contract_header_paths, contract_requirements,
-        media_player_metadata, read_json, reject_forbidden, write_json,
+        description_layout_invariant, media_player_metadata, read_json, reject_forbidden, validate_requirement_metadata, write_json,
     )
     from .validate_report import validate
 except ImportError:
-    from common import PLATFORMS, PROVENANCE_PRIORITY, ToolError, contract_header_paths, contract_requirements, media_player_metadata, read_json, reject_forbidden, write_json
+    from common import PLATFORMS, PROVENANCE_PRIORITY, ToolError, contract_header_paths, contract_requirements, description_layout_invariant, media_player_metadata, read_json, reject_forbidden, validate_requirement_metadata, write_json
     from validate_report import validate
 
 
@@ -106,6 +106,7 @@ def _resolve_platform(contract: Any, platform: str, primary_report: dict[str, An
             "method": entry["method"],
             "evidence": entry["evidence"],
         }
+        selected.update(validate_requirement_metadata(contract_item, f"{platform}:{name}"))
         for field in ("kind", "value_type", "location", "locations"):
             if field in contract_item:
                 selected[field] = contract_item[field]
@@ -140,6 +141,7 @@ def _resolve_platform(contract: Any, platform: str, primary_report: dict[str, An
 
     paths = contract_header_paths(contract)[platform]
     runtime_environment = primary_report["environment"]
+    invariants = description_layout_invariant(resolved)
     mediaplayer = media_player_metadata(contract)
     manifest = {
         "schema_version": 1,
@@ -150,6 +152,7 @@ def _resolve_platform(contract: Any, platform: str, primary_report: dict[str, An
         "runtime_environments": {platform: runtime_environment},
         "runtime_run_ids": {platform: primary_report["run_id"]},
         "requirements": list(resolved),
+        "invariants": {"description_layout": invariants},
     }
     manifest["workflow"] = {"commit": workflow_commit, "run_id": workflow_run_id}
     coverage: dict[str, Any] = {
@@ -200,6 +203,10 @@ def resolve(contract: Any, windows_report: dict[str, Any], linux_report: dict[st
         "runtime_environments": {**windows_manifest["runtime_environments"], **linux_manifest["runtime_environments"]},
         "runtime_run_ids": {**windows_manifest["runtime_run_ids"], **linux_manifest["runtime_run_ids"]},
         "requirements": windows_manifest["requirements"] + linux_manifest["requirements"],
+        "invariants": {"description_layout": {
+            "windows": windows_manifest.get("invariants", {}).get("description_layout", {"status": "NOT_APPLICABLE"}),
+            "linux": linux_manifest.get("invariants", {}).get("description_layout", {"status": "NOT_APPLICABLE"}),
+        }},
     }
     manifest["workflow"] = {"commit": workflow_commit, "run_id": workflow_run_id}
     coverage = {"schema_version": 1, "complete": True, "platforms": {

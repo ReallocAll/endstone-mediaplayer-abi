@@ -23,6 +23,9 @@ struct Requirement {
     std::string name;
     Value value;
     Provenance provenance{Provenance::Unresolved};
+    std::string category;
+    std::string contract_identity;
+    bool runtime_required{false};
     std::string method;
     std::string evidence;
     std::vector<std::string> dependencies;

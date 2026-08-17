@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Iterable
 
 try:
-    from .common import ToolError, parse_int_literal, source_fingerprint, write_json
+    from .common import ToolError, parse_int_literal, requirement_metadata, source_fingerprint, write_json
 except ImportError:  # direct ``python tools/script.py`` execution
-    from common import ToolError, parse_int_literal, source_fingerprint, write_json
+    from common import ToolError, parse_int_literal, requirement_metadata, source_fingerprint, write_json
 
 MACRO = re.compile(r"^\s*#\s*define\s+(ES_[A-Za-z0-9_]+)(?!\s*\()\s+(.+?)\s*$")
 TOKEN = re.compile(r"\bES_[A-Za-z0-9_]+\b")
@@ -99,6 +99,7 @@ def _parse_header(root: Path, path: Path) -> list[dict]:
         if literal is None:
             continue
         value_type, value = literal
+        metadata = requirement_metadata(match.group(1))
         definitions.append(
             {
                 "name": match.group(1),
@@ -106,6 +107,7 @@ def _parse_header(root: Path, path: Path) -> list[dict]:
                 "value_type": value_type,
                 "diagnostic_original_value": value,
                 "location": {"path": path.relative_to(root).as_posix(), "line": line_number},
+                **metadata,
             }
         )
     return definitions
@@ -222,6 +224,12 @@ def scan(root: Path, source_ref: str | None = None, source_commit: str | None = 
     }
     external_references = {name: locations for name, locations in external_references.items() if locations}
 
+    if "ES_PERMISSION_SIZE" in external_references:
+        raise ToolError(
+            "ES_PERMISSION_SIZE is not an external ABI requirement: the MediaPlayer "
+            "permissions vector is empty and must be constructed without an element stride"
+        )
+
     requirements: dict[str, list[dict]] = {}
     unused_generated_definitions: dict[str, list[dict]] = {}
     for platform in sorted(PLATFORM_NAMES):
@@ -235,6 +243,7 @@ def scan(root: Path, source_ref: str | None = None, source_commit: str | None = 
                         "platform": platform,
                         "location": item["location"],
                         "diagnostic_original_value": item["diagnostic_original_value"],
+                        **requirement_metadata(item["name"]),
                     }
                 )
                 continue

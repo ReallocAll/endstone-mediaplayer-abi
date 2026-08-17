@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .common import ToolError, ensure_value, header_paths, read_json, relative_path, reject_forbidden, sha256_bytes, write_json
+    from .common import ToolError, description_layout_invariant, ensure_value, header_paths, read_json, relative_path, reject_forbidden, sha256_bytes, validate_requirement_metadata, write_json
 except ImportError:
-    from common import ToolError, ensure_value, header_paths, read_json, relative_path, reject_forbidden, sha256_bytes, write_json
+    from common import ToolError, description_layout_invariant, ensure_value, header_paths, read_json, relative_path, reject_forbidden, sha256_bytes, validate_requirement_metadata, write_json
 
 
 def _entries(manifest: dict[str, Any], platform: str) -> list[dict[str, Any]]:
@@ -36,6 +36,7 @@ def _entries(manifest: dict[str, Any], platform: str) -> list[dict[str, Any]]:
             raise ToolError(f"unresolved manifest entry {platform}:{entry['name']}")
         try:
             ensure_value(entry.get("value"))
+            validate_requirement_metadata(entry, f"{platform}:{entry['name']}")
             reject_forbidden(entry, f"{platform}:{entry['name']}")
         except ToolError:
             raise
@@ -73,9 +74,11 @@ def generate(manifest: dict[str, Any], output_root: Path) -> dict[str, Any]:
     if not isinstance(raw_paths, dict):
         raise ToolError("manifest header_paths must be an object")
     paths_by_platform = header_paths(raw_paths, tuple(raw_paths))
-    metadata: dict[str, Any] = {"schema_version": 1, "headers": []}
+    metadata: dict[str, Any] = {"schema_version": 1, "headers": [], "invariants": {}}
+    invariant_results: dict[str, Any] = {}
     for platform, paths in paths_by_platform.items():
         entries = _entries(manifest, platform)
+        invariant_results[platform] = description_layout_invariant(entries)
         for entry in entries:
             location = _entry_path(entry, paths[0] if len(paths) == 1 else None)
             if location not in paths:
@@ -97,13 +100,31 @@ def generate(manifest: dict[str, Any], output_root: Path) -> dict[str, Any]:
             ]
             for entry in selected:
                 lines.append(f"#define {entry['name']} {_format_value(entry['value'])} // {entry['provenance']}")
-            lines.extend(["", f"#endif // {guard}", ""])
+            entry_names = {item["name"] for item in selected}
+            if {"ES_PLUGIN_OFF_DESCRIPTION", "ES_DESCRIPTION_SIZE", "ES_PLUGIN_IMPL_SIZE", "ES_DESCRIPTION_ALIGN"}.issubset(entry_names):
+                # These are preprocessor-time guards so a consumer cannot
+                # accept a self-inconsistent synthetic Plugin layout.
+                lines.extend([
+                    "// Consumer-synthetic PluginDescription layout invariants.",
+                    "#if ES_PLUGIN_OFF_DESCRIPTION + ES_DESCRIPTION_SIZE > ES_PLUGIN_IMPL_SIZE",
+                    '#error "PluginDescription extends beyond MinimalPlugin"',
+                    "#endif",
+                    "#if ES_PLUGIN_OFF_DESCRIPTION + ES_DESCRIPTION_SIZE != ES_PLUGIN_IMPL_SIZE",
+                    '#error "PluginDescription does not end at MinimalPlugin size"',
+                    "#endif",
+                    "#if ES_PLUGIN_OFF_DESCRIPTION % ES_DESCRIPTION_ALIGN != 0",
+                    '#error "PluginDescription offset is not aligned"',
+                    "#endif",
+                    "",
+                ])
+            lines.extend([f"#endif // {guard}", ""])
             data = "\n".join(lines).encode("utf-8")
             target = output_root / Path(rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             metadata["headers"].append({"platform": platform, "path": rel, "sha256": sha256_bytes(data), "bytes": len(data)})
     metadata["headers"] = sorted(metadata["headers"], key=lambda item: (item["platform"], item["path"]))
+    metadata["invariants"] = invariant_results
     return metadata
 
 

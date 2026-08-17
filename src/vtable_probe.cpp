@@ -302,16 +302,18 @@ Fact measure_vtable(std::string_view name)
         return slot_fact(decode_slot(static_cast<Method>(&endstone::Block::getType)), "endstone::Block::getType() const");
     }
     if (name == "ES_BLOCK_SLOT_SET_DATA") {
-        using Method = void (endstone::Block::*)(const endstone::BlockData &);
-        return slot_fact(decode_slot(static_cast<Method>(&endstone::Block::setData)), "endstone::Block::setData(BlockData)" );
+        using Method = void (endstone::Block::*)(const endstone::BlockData &, bool);
+        return slot_fact(decode_slot(static_cast<Method>(&endstone::Block::setData)),
+                         "void (endstone::Block::*)(const endstone::BlockData&, bool)");
     }
     if (name == "ES_BLOCK_DATA_SLOT_GET_TYPE") {
         using Method = std::string (endstone::BlockData::*)() const;
         return slot_fact(decode_slot(static_cast<Method>(&endstone::BlockData::getType)), "endstone::BlockData::getType() const");
     }
     if (name == "ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK") {
-        using Method = endstone::ItemStack (endstone::ItemType::*)() const;
-        return slot_fact(decode_slot(static_cast<Method>(&endstone::ItemType::createItemStack)), "endstone::ItemType::createItemStack() const");
+        using Method = endstone::ItemStack (endstone::ItemType::*)(int) const;
+        return slot_fact(decode_slot(static_cast<Method>(&endstone::ItemType::createItemStack)),
+                         "endstone::ItemStack (endstone::ItemType::*)(int) const");
     }
     if (name == "ES_ITEM_STACK_SLOT_GET_ITEM_META") {
         using Method = std::unique_ptr<endstone::ItemMeta> (endstone::ItemStack::Impl::*)() const;

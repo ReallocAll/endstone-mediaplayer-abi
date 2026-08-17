@@ -36,7 +36,6 @@
 #include <endstone/block/block_data.h>
 #include <endstone/inventory/item_stack.h>
 #include <endstone/inventory/item_type.h>
-#include <endstone/permissions/permission.h>
 #include <endstone/plugin/plugin.h>
 #include <endstone/registry.h>
 #include <endstone/util/uuid.h>
@@ -68,6 +67,7 @@ Fact unresolved(std::string_view evidence)
 class MinimalPlugin final : public endstone::Plugin {
 public:
     [[nodiscard]] const endstone::PluginDescription &getDescription() const override { return description_; }
+    [[nodiscard]] std::int64_t description_offset() const { return member_offset(*this, description_); }
 
 private:
     endstone::PluginDescription description_{"abi_layout_probe", "runtime"};
@@ -165,15 +165,15 @@ Fact measure_layout(std::string_view name, const endstone::Plugin *live_plugin, 
                       : unresolved("live Logger pointer was absent or not unique");
     }
     if (name == "ES_PLUGIN_OFF_DESCRIPTION") {
-        if (!live_context || live_plugin == nullptr) {
-            return unresolved("live Plugin-derived description is unavailable outside onEnable");
-        }
-        const auto offset = reinterpret_cast<const std::byte *>(std::addressof(live_plugin->getDescription())) -
-                            reinterpret_cast<const std::byte *>(live_plugin);
-        return measured(static_cast<std::int64_t>(offset), "live Plugin-derived description address difference");
+        const MinimalPlugin plugin;
+        return measured(plugin.description_offset(),
+                        "MinimalPlugin {Plugin base + PluginDescription description_} member address difference");
     }
     if (name == "ES_DESCRIPTION_SIZE") {
         return measured(sizeof(endstone::PluginDescription), "sizeof(endstone::PluginDescription)");
+    }
+    if (name == "ES_DESCRIPTION_ALIGN") {
+        return measured(alignof(endstone::PluginDescription), "alignof(endstone::PluginDescription)");
     }
     if (name == "ES_PLUGIN_IMPL_SIZE") {
         return measured(sizeof(MinimalPlugin), "sizeof minimal Plugin-derived object with PluginDescription");
@@ -226,7 +226,6 @@ Fact measure_layout(std::string_view name, const endstone::Plugin *live_plugin, 
         endstone::Message message = std::string("probe");
         return measured(static_cast<std::int64_t>(message.index()), "runtime Message(string).index()");
     }
-    if (name == "ES_PERMISSION_SIZE") return measured(sizeof(endstone::Permission), "sizeof(endstone::Permission)");
     if (name == "ES_SHARED_PTR_SIZE") return measured(sizeof(std::shared_ptr<void>), "sizeof(std::shared_ptr<void>)");
     if (name == "ES_UUID_SIZE") return measured(sizeof(endstone::UUID), "sizeof(endstone::UUID)");
     if (name == "ES_MAPRENDERER_SIZE" || name == "ES_MAPRENDERER_OFF_IS_CONTEXTUAL") {

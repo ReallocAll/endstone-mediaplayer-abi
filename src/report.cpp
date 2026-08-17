@@ -335,6 +335,11 @@ bool write_report_atomically(const ProbeReport &report)
         json_escape(out, requirement.name);
         out << ",\"value\":";
         json_value(out, requirement.value);
+        out << ",\"category\":";
+        json_escape(out, requirement.category);
+        out << ",\"contract_identity\":";
+        json_escape(out, requirement.contract_identity);
+        out << ",\"runtime_required\":" << (requirement.runtime_required ? "true" : "false");
         out << ",\"provenance\":";
         json_escape(out, provenance_name(requirement.provenance));
         out << ",\"method\":";

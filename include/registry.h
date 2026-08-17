@@ -22,6 +22,9 @@ struct RegistryEntry {
 
 std::span<const RegistryEntry> registry();
 bool applies_to_current_platform(Platform platform);
+[[nodiscard]] std::string_view requirement_category(std::string_view name);
+[[nodiscard]] std::string_view requirement_contract_identity(std::string_view name);
+[[nodiscard]] bool requirement_runtime_required(std::string_view name);
 
 struct RegistryValidation {
     bool valid{false};

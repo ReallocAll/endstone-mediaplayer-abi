@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .common import PROVENANCES, ToolError, contract_requirements, ensure_platform, ensure_value, read_json, reject_forbidden
+    from .common import PROVENANCES, ToolError, contract_requirements, ensure_platform, ensure_value, read_json, reject_forbidden, validate_requirement_metadata
 except ImportError:
-    from common import PROVENANCES, ToolError, contract_requirements, ensure_platform, ensure_value, read_json, reject_forbidden
+    from common import PROVENANCES, ToolError, contract_requirements, ensure_platform, ensure_value, read_json, reject_forbidden, validate_requirement_metadata
 
 NAME = re.compile(r"^ES_[A-Za-z0-9_]+$")
 ENVIRONMENT_FIELDS = (
@@ -95,6 +95,10 @@ def validate(report: Any, *, expected_platform: str | None = None, expected_run_
             errors.append(f"{prefix}.UNRESOLVED value must be null")
         if provenance != "UNRESOLVED" and value is None:
             errors.append(f"{prefix} resolved provenance requires a value")
+        try:
+            validate_requirement_metadata(entry, prefix)
+        except ToolError as exc:
+            errors.append(str(exc))
         method = entry.get("method")
         if not isinstance(method, str) or not method.strip():
             errors.append(f"{prefix}.method must be nonempty")
@@ -116,13 +120,21 @@ def validate(report: Any, *, expected_platform: str | None = None, expected_run_
         errors.append("complete report cannot contain unresolved requirements")
     if contract is not None and platform in {"windows", "linux"}:
         try:
-            expected_names = {item["name"] for item in contract_requirements(contract)[platform]}
+            expected_items = {item["name"]: item for item in contract_requirements(contract)[platform]}
+            expected_names = set(expected_items)
             missing = expected_names - seen
             extra = seen - expected_names
             if missing:
                 errors.append("missing contract requirements: " + ", ".join(sorted(missing)))
             if extra:
                 errors.append("unexpected requirements: " + ", ".join(sorted(extra)))
+            for entry in entries:
+                expected = expected_items.get(entry.get("name"))
+                if expected is None:
+                    continue
+                for field in ("category", "contract_identity", "runtime_required"):
+                    if entry.get(field) != expected.get(field):
+                        errors.append(f"{entry.get('name')} {field} does not match contract")
         except ToolError as exc:
             errors.append(f"contract: {exc}")
     return errors

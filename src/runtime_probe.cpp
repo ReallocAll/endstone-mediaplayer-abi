@@ -15,8 +15,10 @@
 #include <endstone/version.h>
 
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -137,6 +139,44 @@ std::size_t unresolved_count(const std::vector<Requirement> &requirements)
     }));
 }
 
+std::optional<std::int64_t> integer_value(const Requirement &requirement)
+{
+    if (const auto *value = std::get_if<std::int64_t>(&requirement.value)) {
+        return *value;
+    }
+    return std::nullopt;
+}
+
+void validate_description_layout(const std::vector<Requirement> &requirements, std::vector<std::string> &errors)
+{
+    std::map<std::string_view, std::int64_t> values;
+    for (const auto &requirement : requirements) {
+        if (const auto value = integer_value(requirement)) {
+            values.emplace(requirement.name, *value);
+        }
+    }
+    constexpr std::array<std::string_view, 4> names = {
+        "ES_PLUGIN_OFF_DESCRIPTION", "ES_DESCRIPTION_SIZE", "ES_PLUGIN_IMPL_SIZE", "ES_DESCRIPTION_ALIGN"};
+    for (const auto name : names) {
+        if (!values.contains(name)) {
+            return;
+        }
+    }
+    const auto offset = values.at("ES_PLUGIN_OFF_DESCRIPTION");
+    const auto size = values.at("ES_DESCRIPTION_SIZE");
+    const auto impl_size = values.at("ES_PLUGIN_IMPL_SIZE");
+    const auto alignment = values.at("ES_DESCRIPTION_ALIGN");
+    if (offset < 0 || size < 0 || impl_size < 0 || offset + size > impl_size) {
+        errors.emplace_back("description layout invariant failed: PluginDescription exceeds MinimalPlugin");
+    }
+    if (offset + size != impl_size) {
+        errors.emplace_back("description layout invariant failed: PluginDescription does not end at MinimalPlugin size");
+    }
+    if (alignment <= 0 || offset % alignment != 0) {
+        errors.emplace_back("description layout invariant failed: PluginDescription offset is misaligned");
+    }
+}
+
 }  // namespace
 
 ProbeReport collect_report(const endstone::Plugin *plugin, bool live_context, std::string_view run_id,
@@ -172,6 +212,9 @@ ProbeReport collect_report(const endstone::Plugin *plugin, bool live_context, st
         requirement.name = std::string(entry.name);
         requirement.value = std::monostate{};
         requirement.provenance = Provenance::Unresolved;
+        requirement.category = std::string(requirement_category(entry.name));
+        requirement.contract_identity = std::string(requirement_contract_identity(entry.name));
+        requirement.runtime_required = requirement_runtime_required(entry.name);
         requirement.method = std::string(entry.expression);
         requirement.evidence = "no exact measurement was produced";
         requirement.dependencies = split_dependencies(entry.dependencies);
@@ -240,6 +283,8 @@ ProbeReport collect_report(const endstone::Plugin *plugin, bool live_context, st
             }
         }
     }
+
+    validate_description_layout(result.requirements, result.errors);
 
     if (!result.probe_loaded) {
         result.errors.emplace_back("live plugin context is not available");

@@ -18,7 +18,7 @@ constexpr RegistryEntry kRegistry[] = {
     {"ES_BLOCK_DATA_SLOT_DELETE", Platform::Both, "ABI-prefix destructor of endstone::BlockData", ""},
     {"ES_BLOCK_SLOT_DELETE", Platform::Both, "ABI-prefix deleting destructor of endstone::Block", "ES_BLOCK_SLOT_GET_TYPE"},
     {"ES_BLOCK_SLOT_GET_TYPE", Platform::Both, "vslot(endstone::Block::getType)", ""},
-    {"ES_BLOCK_SLOT_SET_DATA", Platform::Both, "vslot(endstone::Block::setData)", ""},
+    {"ES_BLOCK_SLOT_SET_DATA", Platform::Both, "vslot(void (endstone::Block::*)(const endstone::BlockData&, bool))", ""},
     {"ES_BLOCK_SOURCE_SLOT_GET_BLOCK_ENTITY", Platform::Windows, "vslot(IConstBlockSource::getBlockEntity)", ""},
     {"ES_BLOCK_STATE_NODE_OFF_HASH", Platform::Linux, "libc++ unordered-node hash member offset", ""},
     {"ES_BLOCK_STATE_NODE_OFF_KEY", Platform::Both, "unordered-node pair key member offset", ""},
@@ -63,6 +63,7 @@ constexpr RegistryEntry kRegistry[] = {
     {"ES_DESC_OFF_SOFT_DEPEND", Platform::Both, "address difference endstone::PluginDescription::soft_depend_", ""},
     {"ES_DESC_OFF_VERSION", Platform::Both, "address difference endstone::PluginDescription::version_", ""},
     {"ES_DESC_OFF_WEBSITE", Platform::Both, "address difference endstone::PluginDescription::website_", ""},
+    {"ES_DESCRIPTION_ALIGN", Platform::Both, "alignof(endstone::PluginDescription)", ""},
     {"ES_DESCRIPTION_SIZE", Platform::Both, "sizeof(endstone::PluginDescription)", ""},
     {"ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ", Platform::Both, "vslot(endstone::Dimension::getBlockAt(int,int,int))", ""},
     {"ES_DIMENSION_SLOT_GET_NAME", Platform::Both, "vslot(endstone::Dimension::getName)", ""},
@@ -81,7 +82,7 @@ constexpr RegistryEntry kRegistry[] = {
     {"ES_ITEM_STACK_SLOT_DELETE", Platform::Both, "ABI-prefix deleting destructor of endstone::ItemStack::Impl", ""},
     {"ES_ITEM_STACK_SLOT_GET_ITEM_META", Platform::Both, "vslot(endstone::ItemStack::Impl::getItemMeta)", ""},
     {"ES_ITEM_STACK_SLOT_SET_ITEM_META", Platform::Both, "vslot(endstone::ItemStack::Impl::setItemMeta)", ""},
-    {"ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK", Platform::Both, "vslot(endstone::ItemType::createItemStack)", ""},
+    {"ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK", Platform::Both, "vslot(endstone::ItemStack (endstone::ItemType::*)(int) const)", ""},
     {"ES_LOAD_POST_WORLD", Platform::Both, "enum endstone::PluginLoadOrder::PostWorld", ""},
     {"ES_LOCATION_ALIGN", Platform::Both, "alignof(endstone::Location)", ""},
     {"ES_LOCATION_OFF_DIMENSION", Platform::Both, "member-pointer offset endstone::Location::dimension_", ""},
@@ -117,7 +118,6 @@ constexpr RegistryEntry kRegistry[] = {
     {"ES_OPTIONAL_STRING_OFF_HAS_VALUE", Platform::Both, "private optional engaged-member offset with emplace/reset differential", ""},
     {"ES_OPTIONAL_STRING_SIZE", Platform::Both, "sizeof(std::optional<std::string>)", ""},
     {"ES_PERM_OPERATOR", Platform::Both, "enum endstone::PermissionDefault::Operator", ""},
-    {"ES_PERMISSION_SIZE", Platform::Both, "sizeof(endstone::Permission)", ""},
     {"ES_PLAYER_EVENT_OFF_PLAYER", Platform::Both, "member-pointer offset endstone::PlayerEvent::player_", ""},
     {"ES_PLAYER_SLOT_GET_DIMENSION", Platform::Both, "vslot(endstone::Actor::getDimension)", ""},
     {"ES_PLAYER_SLOT_GET_INVENTORY", Platform::Both, "vslot(endstone::Player::getInventory)", ""},
@@ -229,9 +229,43 @@ bool applies_to_current_platform(Platform platform)
 #endif
 }
 
+std::string_view requirement_category(std::string_view name)
+{
+    if (name == "ES_PLUGIN_IMPL_SIZE" || name == "ES_PLUGIN_OFF_DESCRIPTION" || name == "ES_DESCRIPTION_ALIGN") {
+        return "consumer_synthetic_layout";
+    }
+    if (name == "ES_BLOCK_SLOT_DELETE" || name == "ES_BOSSBAR_SLOT_DTOR" || name == "ES_ITEM_META_SLOT_DELETE") {
+        return "derived_invariant";
+    }
+    if (name == "ES_MESSAGE_STRING_INDEX" || name == "ES_PLUGIN_OFF_SERVER" || name == "ES_PLUGIN_OFF_LOGGER") {
+        return "runtime_behavior";
+    }
+    return "external_abi";
+}
+
+std::string_view requirement_contract_identity(std::string_view name)
+{
+    if (name == "ES_BLOCK_SLOT_SET_DATA") {
+        return "void (endstone::Block::*)(const endstone::BlockData&, bool)";
+    }
+    if (name == "ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK") {
+        return "endstone::ItemStack (endstone::ItemType::*)(int) const";
+    }
+    return name;
+}
+
+bool requirement_runtime_required(std::string_view name)
+{
+    return requirement_category(name) == "runtime_behavior";
+}
+
 RegistryValidation validate_registry()
 {
     for (std::size_t index = 0; index < std::size(kRegistry); ++index) {
+        if (requirement_category(kRegistry[index].name).empty() ||
+            requirement_contract_identity(kRegistry[index].name).empty()) {
+            return {false, "missing semantic metadata for " + std::string(kRegistry[index].name)};
+        }
         for (std::size_t other = index + 1; other < std::size(kRegistry); ++other) {
             if (kRegistry[index].name == kRegistry[other].name) {
                 return {false, "duplicate registry name " + std::string(kRegistry[index].name)};
